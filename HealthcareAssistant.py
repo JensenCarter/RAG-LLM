@@ -245,12 +245,12 @@ if user_input := st.chat_input("Type your message here..."):
                                 )
 
                         if nearby_services:
-                            response += f"\n\n📍 **Services Near {st.session_state.location}:**\n- " + "\n- ".join(
+                            response += f"\n\n**Services Near {st.session_state.location}:**\n- " + "\n- ".join(
                                 nearby_services)
                         else:
-                            response += f"\n\nℹ️ No mental health services found within 5 miles of {st.session_state.location}"
+                            response += f"\n\nNo mental health services found within 5 miles of {st.session_state.location}"
                     else:
-                        response += "\n\n⚠️ Could not determine coordinates for your location"
+                        response += "\n\nCould not determine coordinates for your location"
             else:
                 response = get_help_location(st.session_state.pending_question, st.session_state.age)
 
