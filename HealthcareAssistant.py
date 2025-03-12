@@ -6,7 +6,7 @@ from shapely.geometry import Point, Polygon
 import math
 from math import radians, sin, cos, sqrt, atan2
 
-openai.api_key = "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"
+openai.api_key = 
 
 # Staffordshire boundary
 staffordshire_polygon = Polygon([
