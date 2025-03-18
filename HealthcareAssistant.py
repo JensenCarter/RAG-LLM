@@ -1,14 +1,15 @@
 import streamlit as st
 import pandas as pd
 import openai
+import pydeck as pdk
 from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 from shapely.geometry import Point, Polygon
-import math
 from math import radians, sin, cos, sqrt, atan2
+import re
 
-openai.api_key = 
-
-# Staffordshire boundary
+# OpenAI API key
+openai.api_key = ""
 staffordshire_polygon = Polygon([
     (-2.1815, 52.9994), (-2.1289, 52.9912), (-2.0432, 52.9658),
     (-1.9519, 52.9333), (-1.8723, 52.8967), (-1.8064, 52.8583),
@@ -84,7 +85,7 @@ staffordshire_polygon = Polygon([
     (-0.9895, 51.8481), (-1.0000, 51.8328)
 ])
 
-# Load mental health places
+# Load mental health locations
 mental_health_places = []
 try:
     with open('/Users/jensencarter/PycharmProjects/rag_demo.py/mental_health_places.txt', 'r') as f:
@@ -102,98 +103,222 @@ try:
                     st.error(f"Error parsing line: {line.strip()} - {str(e)}")
 except FileNotFoundError:
     st.error("Mental health places file not found")
+except Exception as e:
+    st.error(f"Error loading mental health places: {str(e)}")
 
-# Initialize geolocator
-geolocator = Nominatim(user_agent="healthcare_assistant")
+
+# Configure geolocator
+geolocator = Nominatim(
+    user_agent="healthcare_app/1.0 (contact@example.com)",
+    timeout=10
+)
+geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+
+
+@st.cache_data
+def load_healthcare_services(file_path):
+    healthcare_services = []
+    # Read the spreadsheet and cache result
+    spreadsheet = pd.ExcelFile(file_path)
+
+    for sheet_name in spreadsheet.sheet_names:
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+        for index, row in df.iterrows():
+            try:
+                # Extract service information
+                name = row.get('Service Name', '')
+                postcode = row.get('Postcode', '')
+                if not postcode:
+                    continue
+
+                # Geocode the postcode
+                location = cached_geocode(postcode)
+                if not location:
+                    st.error(f"Could not geocode postcode: {postcode}")
+                    continue
+
+                healthcare_services.append({
+                    'name': name,
+                    'postcode': postcode,
+                    'latitude': location.latitude,
+                    'longitude': location.longitude,
+                    'type': sheet_name
+                })
+            except Exception as e:
+                st.error(f"Error processing row {index} in {sheet_name}: {str(e)}")
+    print(healthcare_services)
+    return healthcare_services
+
+
+@st.cache_data
+def cached_geocode(postcode):
+    return geocode(f"{postcode}, UK")
+
+
+# Use the cached function to load services:
+file_path = '/Users/jensencarter/PycharmProjects/rag_demo.py/Spreadsheet.xlsx'
+healthcare_services = load_healthcare_services(file_path)
+
+
+# Spreadsheet processing for AI
+def format_data(dataframe, sheet_name, max_rows=50):
+    try:
+        dataframe = dataframe.head(max_rows)
+        headers = "| " + " | ".join(dataframe.columns) + " |"
+        separator = "| " + " | ".join(["---"] * len(dataframe.columns)) + " |"
+        rows = "\n".join(
+            "| " + " | ".join(
+                str(cell).replace("\n", " ").strip() if not pd.isna(cell) else "N/A"
+                for cell in row
+            ) + " |"
+            for row in dataframe.values
+        )
+        return f"### {sheet_name}\n{headers}\n{separator}\n{rows}\n"
+    except Exception as e:
+        st.error(f"Error formatting {sheet_name} data: {str(e)}")
+        return ""
+
+
+try:
+    file_path = '/Users/jensencarter/PycharmProjects/rag_demo.py/Spreadsheet.xlsx'
+    spreadsheet = pd.ExcelFile(file_path)
+    combined_data = "\n".join([
+        format_data(pd.read_excel(file_path, sheet_name), sheet_name)
+        for sheet_name in spreadsheet.sheet_names
+    ])
+except FileNotFoundError:
+    st.error("Spreadsheet file not found")
+except Exception as e:
+    st.error(f"Error loading spreadsheet data: {str(e)}")
+
+
+try:
+    combined_data = "\n".join([
+        format_data(pd.read_excel(file_path, sheet_name), sheet_name)
+        for sheet_name in spreadsheet.sheet_names
+    ])
+except Exception as e:
+    st.error(f"Error loading spreadsheet data: {str(e)}")
+    combined_data = ""
 
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 3958.8  # Earth radius in miles
-    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
-
-
-def is_mental_health_query(query):
-    keywords = ['mental health', 'crisis', 'suicidal', 'depression',
-                'anxiety', 'psychological', 'emotional', 'depressed']
-    return any(keyword in query.lower() for keyword in keywords)
+    try:
+        R = 3958.8
+        lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return R * c
+    except Exception as e:
+        st.error(f"Distance calculation error: {str(e)}")
+        return None
 
 
 def is_in_staffordshire(location_str):
-    if ", " not in location_str:
-        location_str += ", UK"
     try:
-        location_data = geolocator.geocode(location_str)
-        if location_data is None:
-            st.session_state.user_coords = None
-            return False
+        if not location_str.endswith(", UK"):
+            location_str += ", UK"
+
+        location_data = geocode(location_str, exactly_one=True)
+
+        if not location_data:
+            if " " in location_str:
+                postcode = location_str.split()[-1]
+                location_data = geocode(f"{postcode}, UK", exactly_one=True)
+
+            if not location_data:
+                st.error("Location not found. Please try a different format")
+                return False
+
         point = Point(location_data.longitude, location_data.latitude)
         st.session_state.user_coords = (location_data.latitude, location_data.longitude)
         return staffordshire_polygon.contains(point)
-    except Exception:
-        st.session_state.user_coords = None
+
+    except Exception as e:
+        st.error(f"Geocoding error: {str(e)}")
         return False
 
+def is_mental_health_query(query):
+    keywords = ['mental health', 'crisis', 'suicidal', 'suicide', 'depression',
+                'anxiety', 'psychological', 'emotional', 'depressed', 'mentally']
+    return any(keyword in query.lower() for keyword in keywords)
 
-def format_data(dataframe, sheet_name, max_rows=50):
-    dataframe = dataframe.head(max_rows)
-    headers = "| " + " | ".join(dataframe.columns) + " |"
-    separator = "| " + " | ".join(["---"] * len(dataframe.columns)) + " |"
-    rows = "\n".join(
-        "| " + " | ".join(
-            str(cell).replace("\n", " ").strip() if not pd.isna(cell) else "N/A"
-            for cell in row
-        ) + " |"
-        for row in dataframe.values
-    )
-    return f"### {sheet_name}\n{headers}\n{separator}\n{rows}\n"
+# AI response functions
+def get_help_staffordshire(query, document, return_service=False):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system",
+                 "content": "You are a data analyst who interprets tabular data from multiple sheets to answer questions, helping people find the most relevant healthcare service."},
+                {"role": "user",
+                 "content": f"The following is data from multiple sheets:\n\n{document}\n\n"
+                            f"Answer the following question in a simple and age-specific way if needed:\n"
+                            f"Question: {query}\n\n"
+                            f"At the end of your response, include the exact recommended service name in this format:\n"
+                            f"Recommended Service: [SERVICE_NAME]"}
+            ],
+            temperature=0.3
+        )
+
+        ai_response = response['choices'][0]['message']['content']
+
+        # Debug
+        #st.write("**AI Response:**", ai_response)
+
+        if return_service:
+            match = re.search(r"Recommended Service:\s*(?:\[(.*?)\]|(.*))", ai_response)
+            if match:
+                recommended_service = match.group(1) if match.group(1) is not None else match.group(2)
+                recommended_service = recommended_service.strip()
+            else:
+                recommended_service = None
+
+            # Debug
+            #st.write("**Extracted Recommended Service:**", recommended_service)
+
+            if not recommended_service:
+                st.error("No recommended service extracted from AI response. Please ensure the response contains the required format.")
+            return ai_response, recommended_service
+
+        return ai_response
+
+    except Exception as e:
+        st.error(f"AI API error: {str(e)}")
+        return "Unable to generate response", None if return_service else "Unable to generate response"
 
 
-def ask_llm(query, document):
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system",
-             "content": "You are a data analyst who interprets tabular data from multiple sheets to answer questions, to help people with their healthcare problems."},
-            {"role": "user",
-             "content": f"The following is data from multiple sheets:\n\n{document}\n\nAnswer the following question in as simple a way as possible: {query}"}
-        ]
-    )
-    return response['choices'][0]['message']['content']
+def get_help_other_location(query, age):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Provide nearest healthcare facilities."},
+                {"role": "user",
+                 "content": f"Location: {st.session_state.location}\nAge: {age}\nQuestion: {query}\nGive advice on nearest services specific to their problem and age."}
+            ],
+            temperature=0.3
+        )
+        return response['choices'][0]['message']['content']
+    except Exception as e:
+        st.error(f"AI API error: {str(e)}")
+        return "Unable to generate response"
 
 
-def get_help_location(query, age):
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Provide nearest healthcare facilities."},
-            {"role": "user",
-             "content": f"Location: {st.session_state.location}\nAge: {age}\nQuestion: {query}\nGive advice on nearest services specific to their problem and age."}
-        ]
-    )
-    return response['choices'][0]['message']['content']
-
-
-# Load spreadsheet data
-file_path = '/Users/jensencarter/PycharmProjects/rag_demo.py/Spreadsheet.xlsx'
-spreadsheet = pd.ExcelFile(file_path)
-combined_data = "\n".join([format_data(pd.read_excel(file_path, sheet_name), sheet_name)
-                           for sheet_name in spreadsheet.sheet_names])
-
+# Streamlit UI
 st.title("Healthcare Assistant Chatbot")
 
-# Session state initialization
+# Initialize session state
 session_defaults = {
     "location": "Staffordshire",
     "messages": [],
     "age": None,
     "asked_for_age": False,
     "pending_question": None,
-    "user_coords": None
+    "user_coords": None,
+    "map_data": None
 }
 
 for key, val in session_defaults.items():
@@ -201,85 +326,214 @@ for key, val in session_defaults.items():
         st.session_state[key] = val
 
 # Location input
-st.session_state.location = st.text_input("Enter your location:", st.session_state.location)
+st.session_state.location = st.text_input(
+    "Enter your location (postcode or town name):",
+    st.session_state.location,
+    help="Example: 'ST16 3DP' or 'Stafford, UK'"
+)
 
 # Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
 
-# Process user input
-if user_input := st.chat_input("Type your message here..."):
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
-    if not st.session_state.asked_for_age:
-        st.session_state.pending_question = user_input
-        st.session_state.messages.append(
-            {"role": "assistant", "content": "Before I provide a response, could you please tell me how old you are?"}
+# Display map
+if st.session_state.map_data is not None:
+    st.subheader("Nearby Services Map")
+    try:
+        scatter_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=st.session_state.map_data,
+            get_position='[longitude, latitude]',
+            get_color='[200, 30, 0, 160]',
+            get_radius=30,
+            radius_scale=3,
+            radius_min_pixels=10,
+            radius_max_pixels=20,
+            pickable=True,
+            stroked=True,
+            filled=True,
+            auto_highlight=True
         )
-        st.session_state.asked_for_age = True
-    elif st.session_state.asked_for_age and st.session_state.age is None:
-        try:
-            st.session_state.age = int(user_input)
-            is_local = is_in_staffordshire(st.session_state.location)
 
+        user_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=st.session_state.map_data[st.session_state.map_data['name'] == 'Your Location'],
+            get_position='[longitude, latitude]',
+            get_color='[0, 120, 250, 200]',
+            get_radius=30,
+            radius_scale=3,
+            radius_min_pixels=10,
+            radius_max_pixels=20,
+            pickable=True
+        )
 
-            if is_local:
-                response = ask_llm(st.session_state.pending_question, combined_data)
+        # Set initial view state
+        initial_lat = st.session_state.user_coords[0]
+        initial_lon = st.session_state.user_coords[1]
+        view_state = pdk.ViewState(
+            latitude=initial_lat,
+            longitude=initial_lon,
+            zoom=12,
+            pitch=0,
+            bearing=0
+        )
 
-                # Add mental health services
-                if is_mental_health_query(st.session_state.pending_question):
+        # Configure tooltip
+        tooltip = {
+            "html": "<b>{name}</b>",
+            "style": {
+                "backgroundColor": "#1a1a1a",
+                "color": "white",
+                "fontSize": "14px"
+            }
+        }
+
+        # Render the map
+        st.pydeck_chart(pdk.Deck(
+            map_style='mapbox://styles/mapbox/light-v9',
+            initial_view_state=view_state,
+            layers=[scatter_layer, user_layer],
+            tooltip=tooltip,
+            parameters={
+                'layersOpacity': 0.8,
+                'blending': 'additive'
+            }
+        ))
+    except Exception as e:
+        st.error(f"Map error: {str(e)}")
+
+# Process user input
+if user_input := st.chat_input("Type your healthcare question here..."):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    try:
+        if not st.session_state.asked_for_age:
+            st.session_state.pending_question = user_input
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "Before I provide a response, could you please tell me your age?"
+            })
+            st.session_state.asked_for_age = True
+
+        elif st.session_state.asked_for_age and st.session_state.age is None:
+            try:
+                st.session_state.age = int(user_input)
+                is_local = is_in_staffordshire(st.session_state.location)
+                if is_local:
+                    # Get AI response along with the recommended service name
+                    response, recommended_service = get_help_staffordshire(
+                        st.session_state.pending_question, combined_data, return_service=True)
+
+                    # Debug
+                    #st.write("**Extracted Recommended Service:**", recommended_service)
+
                     if st.session_state.user_coords:
                         user_lat, user_lon = st.session_state.user_coords
-                        st.write(user_lat)
-                        st.write(user_lon)
+                        map_data = []
                         nearby_services = []
-                        for service in mental_health_places:
-                            distance = haversine(
-                                user_lat, user_lon,
-                                service['latitude'], service['longitude']
-                            )
-                            if distance <= 5:
-                                nearby_services.append(
-                                    f"{service['name']} ({distance:.1f} miles away)"
-                                )
 
-                        if nearby_services:
-                            response += f"\n\n**Services Near {st.session_state.location}:**\n- " + "\n- ".join(
-                                nearby_services)
+                        # Always add the user's location.
+                        map_data.append({
+                            'latitude': user_lat,
+                            'longitude': user_lon,
+                            'name': 'Your Location'
+                        })
+
+                        if is_mental_health_query(st.session_state.pending_question):
+                            # Show all nearby mental health services.
+                            for service in mental_health_places:
+                                distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
+                                if distance and distance <= 10:
+                                    map_data.append({
+                                        'latitude': service['latitude'],
+                                        'longitude': service['longitude'],
+                                        'name': service['name']
+                                    })
+                                    if distance <= 5 and len(nearby_services) < 5:
+                                        nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
                         else:
-                            response += f"\n\nNo mental health services found within 5 miles of {st.session_state.location}"
-                    else:
-                        response += "\n\nCould not determine coordinates for your location"
-            else:
-                response = get_help_location(st.session_state.pending_question, st.session_state.age)
+                            if recommended_service:
+                                for service in healthcare_services:
+                                    if recommended_service.lower() in service['name'].lower() or service[
+                                        'name'].lower() in recommended_service.lower():
+                                        distance = haversine(user_lat, user_lon, service['latitude'],
+                                                             service['longitude'])
+                                        if distance and distance <= 100:
+                                            map_data.append({
+                                                'latitude': service['latitude'],
+                                                'longitude': service['longitude'],
+                                                'name': service['name']
+                                            })
+                                            nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                            break
+                            else:
+                                st.error("No recommended service extracted from the AI response.")
+                        if nearby_services:
+                            response += "\n\n**Recommended Service Location:**\n- " + "\n- ".join(nearby_services)
+                            st.session_state.map_data = pd.DataFrame(map_data)
+                        else:
+                            response += "\n\n**No location found for the recommended service.**"
+                else:
+                    response = get_help_other_location(st.session_state.pending_question, st.session_state.age)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.session_state.pending_question = None
+            except ValueError:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "Please enter a valid age (numbers only)."
+                })
 
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            st.session_state.pending_question = None
-        except ValueError:
-            st.session_state.messages.append({"role": "assistant", "content": "Please enter a valid age."})
-    else:
-        is_local = is_in_staffordshire(st.session_state.location)
-        if is_local:
-            response = ask_llm(user_input, combined_data)
-            if is_mental_health_query(user_input) and st.session_state.user_coords:
-                user_lat, user_lon = st.session_state.user_coords
-                nearby_services = []
-                for service in mental_health_places:
-                    distance = haversine(
-                        user_lat, user_lon,
-                        service['latitude'], service['longitude']
-                    )
-                    if distance <= 5:
-                        nearby_services.append(
-                            f"{service['name']} ({distance:.1f} miles away)"
-                        )
-
-                if nearby_services:
-                    response += f"\n\n📍 **Services Near {st.session_state.location}:**\n- " + "\n- ".join(
-                        nearby_services)
         else:
-            response = get_help_location(user_input, st.session_state.age)
-        st.session_state.messages.append({"role": "assistant", "content": response})
-
+            is_local = is_in_staffordshire(st.session_state.location)
+            if is_local:
+                response, recommended_service = get_help_staffordshire(user_input, combined_data, return_service=True)
+                if st.session_state.user_coords:
+                    user_lat, user_lon = st.session_state.user_coords
+                    map_data = [{
+                        'latitude': user_lat,
+                        'longitude': user_lon,
+                        'name': 'Your Location'
+                    }]
+                    nearby_services = []
+                    if is_mental_health_query(user_input):
+                        for service in mental_health_places:
+                            distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
+                            if distance and distance <= 10:
+                                map_data.append({
+                                    'latitude': service['latitude'],
+                                    'longitude': service['longitude'],
+                                    'name': service['name']
+                                })
+                                if distance <= 5 and len(nearby_services) < 5:
+                                    nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                    else:
+                        if recommended_service:
+                            for service in healthcare_services:
+                                if recommended_service.lower() in service['name'].lower() or service[
+                                    'name'].lower() in recommended_service.lower():
+                                    distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
+                                    if distance and distance <= 100:
+                                        map_data.append({
+                                            'latitude': service['latitude'],
+                                            'longitude': service['longitude'],
+                                            'name': service['name']
+                                        })
+                                        nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                        break
+                        else:
+                            st.error("No recommended service extracted from the AI response.")
+                    if nearby_services:
+                        response += "\n\n**Recommended Service Location:**\n- " + "\n- ".join(nearby_services)
+                        st.session_state.map_data = pd.DataFrame(map_data)
+                    else:
+                        response += "\n\n**No location found for the recommended service.**"
+            else:
+                response = get_help_other_location(user_input, st.session_state.age)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "An error occurred processing your request."
+        })
     st.rerun()
