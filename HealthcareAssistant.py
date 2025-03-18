@@ -318,86 +318,93 @@ for key, val in session_defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
-# Location input
-st.session_state.location = st.text_input(
-    "Enter your location (postcode or town name):",
-    st.session_state.location,
-    help="Example: 'ST16 3DP' or 'Stafford, UK'"
-)
+# Main content container
+with st.container():
+    # Display chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
 
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
+    # Display map if available
+    if st.session_state.map_data is not None:
+        st.subheader("🗺️ Nearby Services Map")
+        try:
+            scatter_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=st.session_state.map_data,
+                get_position='[longitude, latitude]',
+                get_color='[200, 30, 0, 160]',
+                get_radius=30,
+                radius_scale=3,
+                radius_min_pixels=10,
+                radius_max_pixels=20,
+                pickable=True,
+                stroked=True,
+                filled=True,
+                auto_highlight=True
+            )
 
-# Display map
-if st.session_state.map_data is not None:
-    st.subheader("Nearby Services Map")
-    try:
-        scatter_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=st.session_state.map_data,
-            get_position='[longitude, latitude]',
-            get_color='[200, 30, 0, 160]',
-            get_radius=30,
-            radius_scale=3,
-            radius_min_pixels=10,
-            radius_max_pixels=20,
-            pickable=True,
-            stroked=True,
-            filled=True,
-            auto_highlight=True
-        )
+            user_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=st.session_state.map_data[st.session_state.map_data['name'] == 'Your Location'],
+                get_position='[longitude, latitude]',
+                get_color='[0, 120, 250, 200]',
+                get_radius=30,
+                radius_scale=3,
+                radius_min_pixels=10,
+                radius_max_pixels=20,
+                pickable=True
+            )
 
-        user_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=st.session_state.map_data[st.session_state.map_data['name'] == 'Your Location'],
-            get_position='[longitude, latitude]',
-            get_color='[0, 120, 250, 200]',
-            get_radius=30,
-            radius_scale=3,
-            radius_min_pixels=10,
-            radius_max_pixels=20,
-            pickable=True
-        )
+            initial_lat = st.session_state.user_coords[0]
+            initial_lon = st.session_state.user_coords[1]
+            view_state = pdk.ViewState(
+                latitude=initial_lat,
+                longitude=initial_lon,
+                zoom=12,
+                pitch=0,
+                bearing=0
+            )
 
-        # Set initial view state
-        initial_lat = st.session_state.user_coords[0]
-        initial_lon = st.session_state.user_coords[1]
-        view_state = pdk.ViewState(
-            latitude=initial_lat,
-            longitude=initial_lon,
-            zoom=12,
-            pitch=0,
-            bearing=0
-        )
-
-        # Configure tooltip
-        tooltip = {
-            "html": "<b>{name}</b>",
-            "style": {
-                "backgroundColor": "#1a1a1a",
-                "color": "white",
-                "fontSize": "14px"
+            tooltip = {
+                "html": "<b>{name}</b>",
+                "style": {
+                    "backgroundColor": "#1a1a1a",
+                    "color": "white",
+                    "fontSize": "14px"
+                }
             }
-        }
 
-        # Render the map
-        st.pydeck_chart(pdk.Deck(
-            map_style='mapbox://styles/mapbox/light-v9',
-            initial_view_state=view_state,
-            layers=[scatter_layer, user_layer],
-            tooltip=tooltip,
-            parameters={
-                'layersOpacity': 0.8,
-                'blending': 'additive'
-            }
-        ))
-    except Exception as e:
-        st.error(f"Map error: {str(e)}")
+            st.pydeck_chart(pdk.Deck(
+                map_style='mapbox://styles/mapbox/light-v9',
+                initial_view_state=view_state,
+                layers=[scatter_layer, user_layer],
+                tooltip=tooltip,
+                parameters={
+                    'layersOpacity': 0.8,
+                    'blending': 'additive'
+                }
+            ))
+        except Exception as e:
+            st.error(f"Map error: {str(e)}")
 
+# Bottom input section
+st.divider()
+input_col1, input_col2 = st.columns([2, 3])
+with input_col1:
+    st.markdown("**📍 Your Location**")
+    st.session_state.location = st.text_input(
+        "Postcode or town name:",
+        st.session_state.location,
+        help="Example: ST16 3DP or Staffordshire",
+        key="location_input",
+        label_visibility="collapsed"
+    )
+with input_col2:
+    st.markdown("**💬 Healthcare Question**")
+    user_input = st.chat_input("Type your question here...")
 # Process user input
-if user_input := st.chat_input("Type your healthcare question here..."):
+if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     try:
         if not st.session_state.asked_for_age:
@@ -413,63 +420,53 @@ if user_input := st.chat_input("Type your healthcare question here..."):
                 st.session_state.age = int(user_input)
                 is_local = is_in_staffordshire(st.session_state.location)
                 if is_local:
-                    # Get AI response along with the recommended service name
                     response, recommended_service = get_help_staffordshire(
                         st.session_state.pending_question, combined_data, return_service=True)
-
-                    # Debug
-                    # st.write("**Extracted Recommended Service:**", recommended_service)
 
                     if st.session_state.user_coords:
                         user_lat, user_lon = st.session_state.user_coords
                         map_data = []
                         nearby_services = []
 
-                        # Always add the user's location.
+                        # Add user location
                         map_data.append({
                             'latitude': user_lat,
                             'longitude': user_lon,
                             'name': 'Your Location'
                         })
 
+                        # Find nearby services
                         if is_mental_health_query(st.session_state.pending_question):
-                            # Show all nearby mental health services.
                             for service in mental_health_places:
                                 distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
                                 if distance and distance <= 10:
-                                    map_data.append({
-                                        'latitude': service['latitude'],
-                                        'longitude': service['longitude'],
-                                        'name': service['name']
-                                    })
+                                    map_data.append(service)
                                     if distance <= 5 and len(nearby_services) < 5:
-                                        nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                        nearby_services.append(f"{service['name']} ({distance:.1f} miles)")
                         else:
                             if recommended_service:
                                 for service in healthcare_services:
-                                    if recommended_service.lower() in service['name'].lower() or service[
-                                        'name'].lower() in recommended_service.lower():
+                                    if recommended_service.lower() in service['name'].lower():
                                         distance = haversine(user_lat, user_lon, service['latitude'],
                                                              service['longitude'])
                                         if distance and distance <= 100:
-                                            map_data.append({
-                                                'latitude': service['latitude'],
-                                                'longitude': service['longitude'],
-                                                'name': service['name']
-                                            })
-                                            nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                            map_data.append(service)
+                                            nearby_services.append(f"{service['name']} ({distance:.1f} miles)")
                                             break
-                            else:
-                                st.error("No recommended service extracted from the AI response.")
+
+                        # Update response and map
                         if nearby_services:
-                            response += "\n\n**Recommended Service Location:**\n- " + "\n- ".join(nearby_services)
+                            response += "\n\n**Recommended Service Locations:**\n- " + "\n- ".join(nearby_services)
                             st.session_state.map_data = pd.DataFrame(map_data)
                         else:
-                            response += "\n\n**No location found for the recommended service.**"
+                            response += "\n\n**No nearby locations found for the recommended service.**"
+
                 else:
                     response = get_help_other_location(st.session_state.pending_question, st.session_state.age)
+
                 st.session_state.messages.append({"role": "assistant", "content": response})
                 st.session_state.pending_question = None
+
             except ValueError:
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -488,41 +485,28 @@ if user_input := st.chat_input("Type your healthcare question here..."):
                         'name': 'Your Location'
                     }]
                     nearby_services = []
+
                     if is_mental_health_query(user_input):
                         for service in mental_health_places:
                             distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
                             if distance and distance <= 10:
-                                map_data.append({
-                                    'latitude': service['latitude'],
-                                    'longitude': service['longitude'],
-                                    'name': service['name']
-                                })
-                                if distance <= 5 and len(nearby_services) < 5:
-                                    nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                map_data.append(service)
                     else:
                         if recommended_service:
                             for service in healthcare_services:
-                                if recommended_service.lower() in service['name'].lower() or service[
-                                    'name'].lower() in recommended_service.lower():
+                                if recommended_service.lower() in service['name'].lower():
                                     distance = haversine(user_lat, user_lon, service['latitude'], service['longitude'])
                                     if distance and distance <= 100:
-                                        map_data.append({
-                                            'latitude': service['latitude'],
-                                            'longitude': service['longitude'],
-                                            'name': service['name']
-                                        })
-                                        nearby_services.append(f"{service['name']} ({distance:.1f} miles away)")
+                                        map_data.append(service)
                                         break
-                        else:
-                            st.error("No recommended service extracted from the AI response.")
-                    if nearby_services:
-                        response += "\n\n**Recommended Service Location:**\n- " + "\n- ".join(nearby_services)
-                        st.session_state.map_data = pd.DataFrame(map_data)
-                    else:
-                        response += "\n\n**No location found for the recommended service.**"
+
+                    st.session_state.map_data = pd.DataFrame(map_data)
+
+                st.session_state.messages.append({"role": "assistant", "content": response})
             else:
                 response = get_help_other_location(user_input, st.session_state.age)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+                st.session_state.messages.append({"role": "assistant", "content": response})
+
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         st.session_state.messages.append({
