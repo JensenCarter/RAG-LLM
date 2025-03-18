@@ -7,9 +7,10 @@ from geopy.extra.rate_limiter import RateLimiter
 from shapely.geometry import Point, Polygon
 from math import radians, sin, cos, sqrt, atan2
 import re
-
+import os
 # OpenAI API key
-openai.api_key = ""
+
+client = openai.OpenAI(api_key="KEY-HERE")
 staffordshire_polygon = Polygon([
     (-2.1815, 52.9994), (-2.1289, 52.9912), (-2.0432, 52.9658),
     (-1.9519, 52.9333), (-1.8723, 52.8967), (-1.8064, 52.8583),
@@ -88,7 +89,7 @@ staffordshire_polygon = Polygon([
 # Load mental health locations
 mental_health_places = []
 try:
-    with open('/Users/jensencarter/PycharmProjects/rag_demo.py/mental_health_places.txt', 'r') as f:
+    with open('mental_health_places.txt', 'r', encoding='utf-8') as f:
         for line in f:
             if ': ' in line:
                 try:
@@ -105,7 +106,6 @@ except FileNotFoundError:
     st.error("Mental health places file not found")
 except Exception as e:
     st.error(f"Error loading mental health places: {str(e)}")
-
 
 # Configure geolocator
 geolocator = Nominatim(
@@ -146,7 +146,7 @@ def load_healthcare_services(file_path):
                 })
             except Exception as e:
                 st.error(f"Error processing row {index} in {sheet_name}: {str(e)}")
-    print(healthcare_services)
+    # print(healthcare_services)
     return healthcare_services
 
 
@@ -156,7 +156,7 @@ def cached_geocode(postcode):
 
 
 # Use the cached function to load services:
-file_path = '/Users/jensencarter/PycharmProjects/rag_demo.py/Spreadsheet.xlsx'
+file_path = 'Spreadsheet.xlsx'
 healthcare_services = load_healthcare_services(file_path)
 
 
@@ -180,7 +180,7 @@ def format_data(dataframe, sheet_name, max_rows=50):
 
 
 try:
-    file_path = '/Users/jensencarter/PycharmProjects/rag_demo.py/Spreadsheet.xlsx'
+    file_path = 'Spreadsheet.xlsx'
     spreadsheet = pd.ExcelFile(file_path)
     combined_data = "\n".join([
         format_data(pd.read_excel(file_path, sheet_name), sheet_name)
@@ -190,7 +190,6 @@ except FileNotFoundError:
     st.error("Spreadsheet file not found")
 except Exception as e:
     st.error(f"Error loading spreadsheet data: {str(e)}")
-
 
 try:
     combined_data = "\n".join([
@@ -240,16 +239,18 @@ def is_in_staffordshire(location_str):
         st.error(f"Geocoding error: {str(e)}")
         return False
 
+
 def is_mental_health_query(query):
     keywords = ['mental health', 'crisis', 'suicidal', 'suicide', 'depression',
-                'anxiety', 'psychological', 'emotional', 'depressed', 'mentally']
+                'anxiety', 'psychological', 'emotional', 'depressed', 'mentally', 'mental', 'upset', 'feel down', 'sad']
     return any(keyword in query.lower() for keyword in keywords)
+
 
 # AI response functions
 def get_help_staffordshire(query, document, return_service=False):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Updated model
             messages=[
                 {"role": "system",
                  "content": "You are a data analyst who interprets tabular data from multiple sheets to answer questions, helping people find the most relevant healthcare service."},
@@ -263,24 +264,16 @@ def get_help_staffordshire(query, document, return_service=False):
             temperature=0.3
         )
 
-        ai_response = response['choices'][0]['message']['content']
-
-        # Debug
-        #st.write("**AI Response:**", ai_response)
+        ai_response = response.choices[0].message.content
 
         if return_service:
             match = re.search(r"Recommended Service:\s*(?:\[(.*?)\]|(.*))", ai_response)
-            if match:
-                recommended_service = match.group(1) if match.group(1) is not None else match.group(2)
-                recommended_service = recommended_service.strip()
-            else:
-                recommended_service = None
-
-            # Debug
-            #st.write("**Extracted Recommended Service:**", recommended_service)
+            recommended_service = match.group(1) if match and match.group(1) else match.group(
+                2).strip() if match else None
 
             if not recommended_service:
-                st.error("No recommended service extracted from AI response. Please ensure the response contains the required format.")
+                st.error(
+                    "No recommended service extracted from AI response. Please ensure the response contains the required format.")
             return ai_response, recommended_service
 
         return ai_response
@@ -292,16 +285,16 @@ def get_help_staffordshire(query, document, return_service=False):
 
 def get_help_other_location(query, age):
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Updated model
             messages=[
                 {"role": "system", "content": "Provide nearest healthcare facilities."},
                 {"role": "user",
-                 "content": f"Location: {st.session_state.location}\nAge: {age}\nQuestion: {query}\nGive advice on nearest services specific to their problem and age."}
+                 "content": f"Location: {st.session_state.get('location', 'Unknown')}\nAge: {age}\nQuestion: {query}\nGive advice on nearest services specific to their problem and age."}
             ],
             temperature=0.3
         )
-        return response['choices'][0]['message']['content']
+        return response.choices[0].message.content
     except Exception as e:
         st.error(f"AI API error: {str(e)}")
         return "Unable to generate response"
@@ -425,7 +418,7 @@ if user_input := st.chat_input("Type your healthcare question here..."):
                         st.session_state.pending_question, combined_data, return_service=True)
 
                     # Debug
-                    #st.write("**Extracted Recommended Service:**", recommended_service)
+                    # st.write("**Extracted Recommended Service:**", recommended_service)
 
                     if st.session_state.user_coords:
                         user_lat, user_lon = st.session_state.user_coords
